@@ -1,4 +1,5 @@
 const std = @import("std");
+const File = std.fs.File;
 
 pub fn logFn(
     comptime level: std.log.Level,
@@ -28,3 +29,5 @@ pub fn logFn(
     const stderr = std.io.getStdErr().writer();
     nosuspend stderr.print(prefix ++ format ++ "\n", args) catch return;
 }
+
+pub const Writer = File.Writer;

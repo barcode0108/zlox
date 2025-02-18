@@ -5,7 +5,7 @@ const log = std.log;
 const vm = @import("vm.zig");
 
 pub const std_options: std.Options = .{
-    .logFn = @import("log.zig").logFn,
+    .logFn = @import("io.zig").logFn,
 };
 
 pub fn main() !void {
@@ -13,40 +13,37 @@ pub fn main() !void {
 
     log.debug("Argc: {}", .{argv.len});
 
-    vm.init();
+    vm.init(std.io.getStdOut().writer(), std.io.getStdErr().writer());
     defer vm.deinit();
 
     switch (argv.len) {
-        1 => repl(),
+        1 => try repl(),
         2 => runFile(std.mem.span(argv[1])),
         else => {
-            _ = try std.io.getStdErr().write("Usage: zlox [path]\n");
+            try std.io.getStdErr().writeAll("Usage: zlox [path]\n");
             process.exit(64);
         },
     }
 }
 
-fn repl() void {
+fn repl() !void {
     var buf: [1024]u8 = undefined;
 
     var out = std.io.getStdOut();
     var in = std.io.getStdIn();
 
     while (true) {
-        out.writer().print("> ", .{}) catch unreachable;
+        try out.writer().print("> ", .{});
 
         if (in.reader().readUntilDelimiterOrEof(buf[0..], '\n') catch |e| switch (e) {
             error.StreamTooLong => {
-                out.writer().print("Too long\n", .{}) catch unreachable;
-                in.reader().skipUntilDelimiterOrEof('\n') catch {
-                    break;
-                };
+                try out.writer().print("Too long\n", .{});
+                try in.reader().skipUntilDelimiterOrEof('\n');
                 continue;
             },
-            else => unreachable,
+            else => return e,
         }) |line| {
-            out.writer().print("\n", .{}) catch unreachable;
-
+            try out.writer().print("\n", .{});
             vm.interpret(line) catch {};
         } else {
             break;

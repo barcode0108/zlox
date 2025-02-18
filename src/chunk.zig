@@ -13,8 +13,11 @@ pub const OpCode = enum(u8) {
     Pop,
     GetLocal,
     SetLocal,
+    GetUpvalue,
+    SetUpvalue,
     GetGlobal,
     SetGlobal,
+    DefineGlobal,
     Equal,
     Greater,
     Less,
@@ -27,6 +30,8 @@ pub const OpCode = enum(u8) {
     Print,
     Jump,
     JumpIfFalse,
+    Loop,
+    Call,
     Return,
 };
 
@@ -57,6 +62,10 @@ pub fn deinit(self: *Self) void {
     self.constants.deinit(self.gpa);
 
     self.* = undefined;
+}
+
+pub inline fn writeOp(self: *Self, opcode: OpCode, line: u32) void {
+    self.write(@intFromEnum(opcode), line);
 }
 
 pub fn write(self: *Self, byte: u8, line: u32) void {
@@ -112,7 +121,7 @@ pub fn disassembleAt(self: *const Self, offset: usize) usize {
     const instr: OpCode = @enumFromInt(codes[offset]);
 
     const ret = switch (instr) {
-        .Nil,
+        inline .Nil,
         .True,
         .False,
         .Pop,
@@ -127,11 +136,12 @@ pub fn disassembleAt(self: *const Self, offset: usize) usize {
         .Negate,
         .Print,
         .Return,
-        => simpleInstruction(buf[i..], instr, offset),
-        .Constant, .SetGlobal, .GetGlobal => constantInstruction(buf[i..], instr, self, offset),
-        .SetLocal, .GetLocal => byteInstruction(buf[i..], instr, self, offset),
+        => |op| simpleInstruction(buf[i..], @tagName(op), offset),
+        inline .Constant, .SetGlobal, .GetGlobal, .DefineGlobal => |op| constantInstruction(buf[i..], @tagName(op), self, offset),
+        inline .Call, .SetLocal, .GetLocal => |op| byteInstruction(buf[i..], @tagName(op), self, offset),
+        inline .JumpIfFalse, .Jump, .Loop => |op| jumpInstruction(buf[i..], if (op == .Loop) -1 else 1, @tagName(op), codes, offset),
 
-        else => simpleInstruction(buf[i..], instr, offset),
+        else => offset + 1,
     };
 
     log.debug("{s}", .{buf});
@@ -139,17 +149,17 @@ pub fn disassembleAt(self: *const Self, offset: usize) usize {
     return ret;
 }
 
-fn simpleInstruction(buf: []u8, code: OpCode, offset: usize) usize {
-    _ = std.fmt.bufPrint(buf, "{s}", .{@tagName(code)}) catch unreachable;
+fn simpleInstruction(buf: []u8, comptime name: []const u8, offset: usize) usize {
+    _ = std.fmt.bufPrint(buf, "{s}", .{name}) catch unreachable;
     return offset + 1;
 }
 
-fn constantInstruction(buf: []u8, code: OpCode, chunk: *const Self, offset: usize) usize {
+fn constantInstruction(buf: []u8, comptime name: []const u8, chunk: *const Self, offset: usize) usize {
     const idx: u8 = chunk.codes.items(.code)[offset + 1];
     std.debug.assert(idx < chunk.constants.items.len);
 
     _ = std.fmt.bufPrint(buf, "{s:<16} {d:4} '{s}'", .{
-        @tagName(code),
+        name,
         idx,
         chunk.constants.items[idx],
     }) catch unreachable;
@@ -157,15 +167,24 @@ fn constantInstruction(buf: []u8, code: OpCode, chunk: *const Self, offset: usiz
     return offset + 2;
 }
 
-fn byteInstruction(buf: []u8, code: OpCode, chunk: *const Self, offset: usize) usize {
+fn byteInstruction(buf: []u8, comptime name: []const u8, chunk: *const Self, offset: usize) usize {
     const idx: u8 = chunk.codes.items(.code)[offset + 1];
 
     _ = std.fmt.bufPrint(buf, "{s:<16} {d:4}", .{
-        @tagName(code),
+        name,
         idx,
     }) catch unreachable;
 
     return offset + 2;
+}
+
+fn jumpInstruction(buf: []u8, sign: comptime_int, comptime name: []const u8, codes: []const u8, offset: usize) usize {
+    const jump: u16 = @as(u16, codes[offset + 1]) << 8 | codes[offset + 2];
+    const dist: i32 = @as(i32, @intCast(offset)) + @as(i32, jump) * sign;
+
+    _ = std.fmt.bufPrint(buf, "{s:<16} {d:4} -> {d}", .{ name, offset, 3 + dist }) catch unreachable;
+
+    return offset + 3;
 }
 
 test "Chunk" {
