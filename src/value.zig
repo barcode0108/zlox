@@ -84,6 +84,7 @@ pub const Value = packed union {
                         return Value.fromObject(&@field(v.*, "obj"));
                     }
                 }
+
                 @compileLog(p.child);
                 @compileError("Invalid pointer type");
             },

@@ -11,11 +11,14 @@ pub fn build(b: *std.Build) void {
     });
 
     const trace_execution =
-        b.option(bool, "trace_execution", "trace execution") orelse false;
+        b.option(bool, "trace-execution", "Trace instruction execution and stack") orelse false;
     const print_code =
-        b.option(bool, "print_code", "print code") orelse true;
+        b.option(bool, "print-code", "Print compiled code(default true on debug build)") orelse true;
     const stress_gc =
-        b.option(bool, "stress_gc", "stress gc") orelse false;
+        b.option(bool, "stress-gc", "Stress GC. Runs every allocation") orelse false;
+
+    const log_gc =
+        b.option(bool, "log-gc", "Log GC information(default true on debug build)") orelse true;
 
     const testing_allcator = false;
 
@@ -23,6 +26,7 @@ pub fn build(b: *std.Build) void {
     debug_flag.addOption(bool, "trace_execution", if (optimize == .Debug) trace_execution else false);
     debug_flag.addOption(bool, "print_code", if (optimize == .Debug) print_code else false);
     debug_flag.addOption(bool, "stress_gc", if (optimize == .Debug) stress_gc else false);
+    debug_flag.addOption(bool, "log_gc", if (optimize == .Debug) log_gc else false);
     debug_flag.addOption(bool, "testing_allocator", if (optimize == .Debug) testing_allcator else false);
 
     exe_mod.addOptions("debug", debug_flag);

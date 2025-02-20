@@ -1,7 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const fs = std.fs;
 const process = std.process;
 const log = std.log;
+
+const memory = @import("memory.zig");
 
 const vm = @import("vm.zig");
 
@@ -19,7 +22,7 @@ pub fn main() !void {
 
     switch (argv.len) {
         1 => try repl(),
-        2 => runFile(std.mem.span(argv[1])),
+        2 => try runFile(std.mem.span(argv[1])),
         else => {
             try std.io.getStdErr().writeAll("Usage: zlox [path]\n");
             process.exit(64);
@@ -52,6 +55,36 @@ fn repl() !void {
     }
 }
 
-fn runFile(path: []const u8) void {
-    _ = path;
+fn runFile(path: []const u8) !void {
+    const source = try readFile(path);
+    defer memory.gpa.free(source);
+
+    vm.interpret(source) catch |e| switch (e) {
+        error.CompileError => process.exit(65),
+        error.RuntimeError => process.exit(70),
+    };
+}
+
+fn readFile(path: []const u8) ![]u8 {
+    var err = std.io.getStdErr();
+    const file = fs.cwd().openFile(path, .{}) catch {
+        try err.writer().print("Could not open file \"{s}\".\n", .{path});
+        process.exit(74);
+    };
+
+    defer file.close();
+
+    const stat = try file.stat(); // TODO: handle error
+
+    const buf = memory.gpa.alloc(u8, stat.size) catch {
+        try err.writer().print("Not enough memory to read \"{s}\".\n", .{path});
+        process.exit(74);
+    };
+
+    _ = file.readAll(buf) catch {
+        try err.writer().print("Could not read file \"{s}\".\n", .{path});
+        process.exit(74);
+    };
+
+    return buf;
 }

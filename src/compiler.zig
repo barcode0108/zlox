@@ -198,7 +198,7 @@ fn errorAt(self: *Parser, token: *const Token, msg: []const u8) void {
         else => writer.writer().print(" at '{s}'", .{token.lexeme}) catch return,
     }
 
-    writer.writer().print(" {s}\n", .{msg}) catch return;
+    writer.writer().print(": {s}\n", .{msg}) catch return;
 }
 
 fn emitByte(self: *Parser, byte: u8) void {

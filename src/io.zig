@@ -1,6 +1,8 @@
 const std = @import("std");
 const File = std.fs.File;
 
+const debug_log_gc = @import("debug").log_gc;
+
 pub fn logFn(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
@@ -8,6 +10,10 @@ pub fn logFn(
     args: anytype,
 ) void {
     const E = "\x1b[";
+
+    if (comptime debug_log_gc) {
+        if (scope == .GC) return;
+    }
 
     const scope_prefix = E ++ "34m" ++ switch (scope) {
         std.log.default_log_scope => "",
