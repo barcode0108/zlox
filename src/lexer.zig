@@ -90,7 +90,7 @@ pub fn scan(self: *Self) Token {
         '{' => .LeftBrace,
         '}' => .RightBrace,
         ';' => .Semicolon,
-        ':' => .Comma,
+        ',' => .Comma,
         '.' => .Dot,
         '+' => .Plus,
         '-' => .Minus,
