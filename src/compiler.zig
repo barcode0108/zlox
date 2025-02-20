@@ -16,7 +16,7 @@ const debug_print_code = @import("debug").print_code;
 
 const FunctionType = enum {
     function,
-    initailizer,
+    initializer,
     method,
     script,
 };
@@ -28,12 +28,12 @@ pub const Compiler = struct {
 
     locals: Locals,
     upvalues: Upvalues,
-    scope_depth: u32,
+    scope_depth: u16,
 
     const Locals = container.Array(Local, std.math.maxInt(u8) + 1);
     const Upvalues = container.Array(Upvalue, std.math.maxInt(u8) + 1);
 
-    pub fn init(comptime ft: FunctionType, name: []const u8, enclosing: ?*Compiler) Compiler {
+    pub fn init(ft: FunctionType, name: []const u8, enclosing: ?*Compiler) Compiler {
         var ret = Compiler{
             .enclosing = enclosing,
             .function = lox.Function.create(if (ft == .script) null else name),
@@ -44,7 +44,7 @@ pub const Compiler = struct {
         };
 
         const p = ret.locals.addOne();
-        p.name.lexeme = "";
+        p.name.lexeme = if (ft != .function) "this" else "";
         p.depth = 0;
 
         return ret;
@@ -83,14 +83,29 @@ pub const Compiler = struct {
     }
 
     pub fn addReturn(self: *Compiler, line: u32) void {
-        self.function.chunk.writeOp(.Nil, line);
+        if (self.ftype == .initializer) {
+            self.function.chunk.writeOp(.GetLocal, line);
+            self.function.chunk.write(0, line);
+        } else {
+            self.function.chunk.writeOp(.Nil, line);
+        }
         self.function.chunk.writeOp(.Return, line);
+    }
+};
+
+const ClassCompiler = struct {
+    enclosing: ?*ClassCompiler,
+
+    pub fn init(enclosing: ?*ClassCompiler) ClassCompiler {
+        return .{
+            .enclosing = enclosing,
+        };
     }
 };
 
 const Local = struct {
     name: Token,
-    depth: ?u32,
+    depth: ?u16,
     captured: bool,
 };
 
@@ -110,6 +125,7 @@ panic_mode: bool,
 lexer: Lexer,
 
 current_compiler: ?*Compiler,
+current_class: ?*ClassCompiler,
 
 pub fn init(err: io.Writer) Parser {
     return .{
@@ -119,6 +135,7 @@ pub fn init(err: io.Writer) Parser {
         .panic_mode = false,
         .lexer = undefined,
         .current_compiler = null,
+        .current_class = null,
         .err_writer = err,
     };
 }
@@ -201,6 +218,7 @@ fn emitConstant(self: *Parser, v: lox.Value) void {
 
 fn emitReturn(self: *Parser) void {
     const com = self.current_compiler orelse unreachable;
+
     com.addReturn(self.prev.line);
 }
 
@@ -396,6 +414,10 @@ const rules = Rules.initDefault(ParseRule{}, .{
 
     .Identifier = ParseRule.initPrefix(variable),
 
+    .Dot = ParseRule.init(null, dot, .Call),
+
+    .This = ParseRule.initPrefix(this),
+
     .False = ParseRule.initPrefix(literal),
     .True = ParseRule.initPrefix(literal),
     .Nil = ParseRule.initPrefix(literal),
@@ -508,6 +530,33 @@ fn call(self: *Parser, _: bool) void {
     self.emitBytes(.Call, arg_count);
 }
 
+fn dot(self: *Parser, can_assign: bool) void {
+    self.consume(.Identifier, "Expect property name after '.'.");
+
+    const name = self.identifierConstant(&self.prev);
+
+    if (can_assign and self.match(.Equal)) {
+        self.expression();
+        self.emitBytes(.SetProperty, name);
+    } else if (self.match(.LeftParen)) {
+        const arg_count = self.argumentList();
+
+        self.emitBytes(.Invoke, name);
+        self.emitByte(arg_count);
+    } else {
+        self.emitBytes(.GetProperty, name);
+    }
+}
+
+fn this(self: *Parser, _: bool) void {
+    if (self.current_class == null) {
+        self.errorAtPrev("Can't use 'this' outside of a class.");
+        return;
+    }
+
+    self.variable(false);
+}
+
 fn argumentList(self: *Parser) u8 {
     var count: u8 = 0;
 
@@ -532,7 +581,7 @@ fn argumentList(self: *Parser) u8 {
     return count;
 }
 
-fn function(self: *Parser, comptime ft: FunctionType) void {
+fn function(self: *Parser, ft: FunctionType) void {
     var compiler = Compiler.init(ft, self.prev.lexeme, self.current_compiler);
     self.current_compiler = &compiler;
     compiler.beginScope();
@@ -639,8 +688,22 @@ fn expression(self: *Parser) void {
     self.parsePrecedence(.Assignment);
 }
 
+fn method(self: *Parser) void {
+    self.consume(.Identifier, "Expect method name.");
+    const constant = self.identifierConstant(&self.prev);
+
+    const ft =
+        if (std.mem.eql(u8, self.prev.lexeme, "init")) FunctionType.initializer else FunctionType.method;
+
+    self.function(ft);
+
+    self.emitBytes(.Method, constant);
+}
+
 fn declaration(self: *Parser) void {
-    if (self.match(.Fun)) {
+    if (self.match(.Class)) {
+        self.classDeclaration();
+    } else if (self.match(.Fun)) {
         self.funDeclaration();
     } else if (self.match(.Var)) {
         self.varDeclaration();
@@ -649,6 +712,31 @@ fn declaration(self: *Parser) void {
     }
 
     if (self.panic_mode) self.synchronize();
+}
+
+fn classDeclaration(self: *Parser) void {
+    self.consume(.Identifier, "Expect class name.");
+    const class_name = self.prev;
+    const name_constant = self.identifierConstant(&class_name);
+    self.declareVariable();
+
+    self.emitBytes(.Class, name_constant);
+    self.defineVariable(name_constant);
+
+    var class_compiler = ClassCompiler.init(self.current_class);
+    self.current_class = &class_compiler;
+    defer self.current_class = self.current_class.?.enclosing;
+
+    self.namedVariable(class_name, false);
+
+    self.consume(.LeftBrace, "Expect '{' before class body.");
+
+    while (!self.check(.RightBrace) and !self.check(.Eof)) {
+        self.method();
+    }
+
+    self.consume(.RightBrace, "Expect '}' after class body.");
+    self.emitOp(.Pop);
 }
 
 fn funDeclaration(self: *Parser) void {
@@ -840,6 +928,9 @@ fn returnStatement(self: *Parser) void {
     if (self.match(.Semicolon)) {
         self.current_compiler.?.addReturn(self.prev.line);
     } else {
+        if (self.current_compiler.?.ftype == .initializer) {
+            self.errorAtPrev("Can't return a value from an initializer.");
+        }
         self.expression();
         self.consume(.Semicolon, "Expect ';' after return value.");
         self.emitOp(.Return);

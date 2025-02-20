@@ -35,6 +35,11 @@ pub const OpCode = enum(u8) {
     Closure,
     CloseUpvalue,
     Return,
+    Class,
+    SetProperty,
+    GetProperty,
+    Method,
+    Invoke,
 };
 
 const Self = @This();
@@ -145,6 +150,10 @@ pub fn disassembleAt(self: *const Self, offset: usize) usize {
         .GetGlobal,
         .DefineGlobal,
         .Closure,
+        .Class,
+        .GetProperty,
+        .SetProperty,
+        .Method,
         => |op| constantInstruction(buf[i..], @tagName(op), self, offset),
         inline .Call,
         .SetLocal,
@@ -156,16 +165,7 @@ pub fn disassembleAt(self: *const Self, offset: usize) usize {
         .Jump,
         .Loop,
         => |op| jumpInstruction(buf[i..], if (op == .Loop) -1 else 1, @tagName(op), codes, offset),
-        // inline .Closure => |op| {
-        //     const constant = codes[offset + 1];
-        //     _ = std.fmt.bufPrint(buf[i..], "{s:<16} {d:4} {s}", .{
-        //         @tagName(op),
-        //         constant,
-        //         self.constants.items[constant],
-        //     }) catch unreachable;
-        //
-        //     break :sw offset + 2;
-        // },
+        inline .Invoke => |op| invokeInstruction(buf[i..], @tagName(op), self, offset),
     };
 
     log.debug("{s}", .{buf});
@@ -227,6 +227,21 @@ fn jumpInstruction(buf: []u8, sign: comptime_int, comptime name: []const u8, cod
     const dist: i32 = @as(i32, @intCast(offset)) + @as(i32, jump) * sign;
 
     _ = std.fmt.bufPrint(buf, "{s:<16} {d:4} -> {d}", .{ name, offset, 3 + dist }) catch unreachable;
+
+    return offset + 3;
+}
+
+fn invokeInstruction(buf: []u8, comptime name: []const u8, chunk: *const Self, offset: usize) usize {
+    const codes = chunk.codes.items(.code);
+    const constant = codes[offset + 1];
+    const arg_count = codes[offset + 2];
+
+    _ = std.fmt.bufPrint(buf, "{s:<16} ({d} args) {d:4} '{s}'", .{
+        name,
+        arg_count,
+        constant,
+        chunk.constants.items[constant],
+    }) catch unreachable;
 
     return offset + 3;
 }

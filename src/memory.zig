@@ -111,7 +111,7 @@ const GCAllocator = struct {
         }
     }
 
-    pub fn markObjects(self: *GCAllocator, object: ?*lox.Object) void {
+    pub fn markObject(self: *GCAllocator, object: ?*lox.Object) void {
         const obj = object orelse return;
         if (obj.marked) return;
         log.debug("{*} mark {s}", .{ obj, lox.Value.from(obj) });
@@ -154,18 +154,33 @@ const GCAllocator = struct {
         log.debug("{*} blacken {s}", .{ object, lox.Value.from(object) });
 
         switch (object.tag) {
+            .bound_method => {
+                const bound: *lox.BoundMethod = object.as(.bound_method);
+                self.markValue(bound.receiver);
+                self.markObject(&@constCast(bound.method).obj);
+            },
+            .instance => {
+                const instance: *lox.Instance = object.as(.instance);
+                self.markObject(&@constCast(instance.class).obj);
+                self.markTable(&instance.field);
+            },
+            .class => {
+                const class: *lox.Class = object.as(.class);
+                self.markObject(&class.name.obj);
+                self.markTable(&class.method);
+            },
             .closure => {
                 const closure: *lox.Closure = object.as(.closure);
 
-                self.markObjects(&closure.function.obj);
+                self.markObject(&@constCast(closure.function).obj);
                 for (closure.upvalues) |upvalue| {
-                    self.markObjects(&upvalue.obj);
+                    self.markObject(&upvalue.obj);
                 }
             },
             .function => {
                 const function: *lox.Function = object.as(.function);
                 if (function.name) |name| {
-                    self.markObjects(&name.obj);
+                    self.markObject(&name.obj);
                 }
                 self.markArray(function.chunk.constants.items);
             },
@@ -183,7 +198,7 @@ const GCAllocator = struct {
     fn markCompilerRoots(self: *GCAllocator, compiler: *Compiler) void {
         var compilers: ?*Compiler = compiler;
         while (compilers) |com| : (compilers = com.enclosing) {
-            self.markObjects(&com.function.obj);
+            self.markObject(&com.function.obj);
         }
     }
 
@@ -194,12 +209,12 @@ const GCAllocator = struct {
         }
 
         for (vm.frames.buf[0..vm.frames.len]) |*frame| {
-            self.markObjects(&frame.closure.obj);
+            self.markObject(&@constCast(frame.closure).obj);
         }
 
         var upvalues: ?*lox.Upvalue = vm.open_upvalues;
         while (upvalues) |upvalue| : (upvalues = upvalue.next) {
-            self.markObjects(&upvalue.obj);
+            self.markObject(&upvalue.obj);
         }
 
         self.markTable(&vm.globals);
@@ -208,19 +223,21 @@ const GCAllocator = struct {
                 self.markCompilerRoots(com);
             }
         }
+
+        self.markObject(&vm.init_string.obj);
     }
 
     fn markTable(self: *GCAllocator, table: *Table) void {
         for (table.entries) |entry| {
             if (entry.key) |k| {
-                self.markObjects(&k.obj);
+                self.markObject(&k.obj);
             }
             self.markValue(entry.value);
         }
     }
 
     fn markValue(self: *GCAllocator, value: lox.Value) void {
-        if (value.isObject()) self.markObjects(value.asObject());
+        if (value.isObject()) self.markObject(value.asObject());
     }
 
     fn alloc(ctx: *anyopaque, n: usize, alignment: mem.Alignment, ra: usize) ?[*]u8 {

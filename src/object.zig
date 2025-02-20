@@ -5,6 +5,7 @@ const log = std.log.scoped(.GC);
 const vm = @import("vm.zig");
 const lox = @import("lox.zig");
 const Chunk = @import("chunk.zig");
+const Table = @import("table.zig");
 
 const Obj = @This();
 
@@ -15,9 +16,20 @@ pub const Types = union(Tag) {
     closure: Closure,
     upvalue: Upvalue,
     class: Class,
+    instance: Instance,
+    bound_method: BoundMethod,
 };
 
-pub const Tag = enum { string, function, native, closure, upvalue, class };
+pub const Tag = enum {
+    string,
+    function,
+    native,
+    closure,
+    upvalue,
+    class,
+    instance,
+    bound_method,
+};
 
 next: ?*Obj,
 tag: Tag,
@@ -36,7 +48,7 @@ pub fn create(comptime tag: Tag) *meta.TagPayload(Types, tag) {
     const p = memory.gc.allocator().create(T) catch @panic("OOM");
     p.obj = Obj.init(tag, memory.gc.objects);
 
-    log.debug("{*} allocate {d} for {s}", .{ p, @sizeOf(T), @tagName(tag) });
+    log.debug("{*} allocate {d}", .{ p, @sizeOf(T) });
     memory.gc.objects = &p.obj;
 
     return p;
@@ -232,10 +244,10 @@ pub const Function = struct {
 
 pub const Closure = struct {
     obj: Obj,
-    function: *Function,
+    function: *const Function,
     upvalues: []*Upvalue,
 
-    pub fn create(func: *Function) *Closure {
+    pub fn create(func: *const Function) *Closure {
         const p: *Closure = Obj.create(.closure);
         p.function = func;
         p.upvalues = memory.gc.allocator().alloc(*Upvalue, func.upvalue_count) catch @panic("OOM");
@@ -318,11 +330,18 @@ pub const Upvalue = struct {
 pub const Class = struct {
     obj: Obj,
     name: *String,
+    method: Table,
 
     pub fn create(name: *String) *Class {
         const p: *Class = Obj.create(.class);
         p.name = name;
+        p.method = Table.init(memory.gc.allocator());
+
         return p;
+    }
+
+    pub fn deinit(self: *Class) void {
+        self.method.deinit();
     }
 
     pub fn format(
@@ -334,7 +353,66 @@ pub const Class = struct {
         if (comptime fmt.len == 0) {
             try formatObj(self.*, fmt, options, writer, 2);
         } else {
-            try writer.writeAll("class");
+            try writer.print("{s}", .{self.name});
+        }
+    }
+};
+
+pub const Instance = struct {
+    obj: Obj,
+    class: *const Class,
+    field: Table,
+
+    pub fn create(class: *const Class) *Instance {
+        const p: *Instance = Obj.create(.instance);
+        p.class = class;
+        p.field = Table.init(memory.gc.allocator());
+
+        return p;
+    }
+
+    pub fn deinit(self: *Instance) void {
+        self.field.deinit();
+    }
+
+    pub fn format(
+        self: *const Instance,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (comptime fmt.len == 0) {
+            try formatObj(self.*, fmt, options, writer, 2);
+        } else {
+            try writer.print("{s} instance", .{self.class});
+        }
+    }
+};
+
+pub const BoundMethod = struct {
+    obj: Obj,
+    receiver: lox.Value,
+    method: *const lox.Closure,
+
+    pub fn create(receiver: lox.Value, method: *const lox.Closure) *BoundMethod {
+        const p: *BoundMethod = Obj.create(.bound_method);
+
+        p.receiver = receiver;
+        p.method = method;
+
+        return p;
+    }
+
+    pub fn format(
+        self: *const BoundMethod,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (comptime fmt.len == 0) {
+            try formatObj(self.*, fmt, options, writer, 2);
+        } else {
+            try writer.print("{s}", .{self.method});
         }
     }
 };

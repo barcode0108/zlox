@@ -25,7 +25,7 @@ const CallFrame = struct {
     ip: [*]u8,
     slots: [*]lox.Value,
 
-    closure: *lox.Closure,
+    closure: *const lox.Closure,
 
     pub inline fn readByte(self: *CallFrame) u8 {
         const r = self.ip[0];
@@ -59,6 +59,7 @@ pub var strings: Table = undefined;
 pub var globals: Table = undefined;
 pub var open_upvalues: ?*lox.Upvalue = null;
 pub var current: ?*Compiler = null;
+pub var init_string: *lox.String = undefined;
 
 pub fn init(out: io.Writer, err: io.Writer) void {
     resetStack();
@@ -72,12 +73,15 @@ pub fn init(out: io.Writer, err: io.Writer) void {
     strings = Table.init(memory.gpa);
     globals = Table.init(memory.gpa);
 
+    init_string = lox.String.copy("init");
+
     defineNative("clock", native.clock);
 }
 
 pub fn deinit() void {
     strings.deinit();
     globals.deinit();
+    init_string = undefined;
     memory.gc.deinit();
 }
 
@@ -330,8 +334,96 @@ fn run() InterpretError!void {
                 stack.push(result);
                 frame = frames.backPtr();
             },
+            .Class => {
+                const class = lox.Class.create(frame.readString());
+                stack.push(lox.Value.from(class));
+            },
+            .GetProperty => {
+                const instance: *lox.Instance = stack.peek(0).asObject().as(.instance);
+                const name = frame.readString();
+
+                if (instance.field.get(name)) |value| {
+                    _ = stack.pop(); // instance
+                    stack.push(value);
+                } else {
+                    try bindMethod(instance.class, name);
+                }
+            },
+            .SetProperty => {
+                const v = stack.peek(1);
+                if (!v.isObject() and v.asObject().is(.instance)) {
+                    runtimeError("Only instances have fields.", .{});
+                    return error.RuntimeError;
+                }
+                const instance: *lox.Instance = stack.peek(1).asObject().as(.instance);
+                const name = frame.readString();
+                _ = instance.field.set(name, stack.peek(0));
+
+                const value = stack.pop();
+                _ = stack.pop();
+
+                stack.push(value);
+            },
+            .Method => defineMethod(frame.readString()),
+            .Invoke => {
+                const method = frame.readString();
+                const arg_count = frame.readByte();
+
+                try invoke(method, arg_count);
+
+                frame = frames.backPtr();
+            },
         }
     }
+}
+
+fn invoke(name: *lox.String, arg_count: u8) !void {
+    const receiver = stack.peek(arg_count);
+
+    if (!receiver.isObject() and !receiver.asObject().is(.instance)) {
+        runtimeError("Only instances have methods.", .{});
+        return error.RuntimeError;
+    }
+
+    const instance: *lox.Instance = receiver.asObject().as(.instance);
+
+    if (instance.field.get(name)) |value| {
+        const p = stack.top - arg_count - 1;
+        p[0] = value;
+
+        return callValue(value, arg_count);
+    }
+
+    try invokeFromClass(instance.class, name, arg_count);
+}
+
+fn invokeFromClass(class: *const lox.Class, name: *lox.String, arg_count: u8) !void {
+    if (class.method.get(name)) |method| {
+        return call(method.asObject().as(.closure), arg_count);
+    } else {
+        runtimeError("Undefined property '{s}'.", .{name});
+        return error.RuntimeError;
+    }
+}
+
+fn bindMethod(class: *const lox.Class, name: *lox.String) !void {
+    if (class.method.get(name)) |method| {
+        const bound = lox.BoundMethod.create(stack.peek(0), method.asObject().as(.closure));
+        _ = stack.pop();
+        stack.push(lox.Value.from(bound));
+    } else {
+        runtimeError("Undefined property '{s}'.", .{name});
+        return error.RuntimeError;
+    }
+}
+
+fn defineMethod(name: *lox.String) void {
+    const method = stack.peek(0);
+
+    const class: *lox.Class = stack.peek(1).asObject().as(.class);
+    _ = class.method.set(name, method);
+
+    _ = stack.pop();
 }
 
 fn captureUpvalue(local: *lox.Value) *lox.Upvalue {
@@ -375,9 +467,30 @@ fn callValue(callee: lox.Value, arg_count: u32) !void {
         const obj = callee.asObject();
 
         switch (obj.tag) {
-            inline .closure => |tag| return call(obj.as(tag), arg_count),
-            inline .native => |tag| {
-                const nativ = obj.as(tag);
+            .bound_method => {
+                const bound: *lox.BoundMethod = obj.as(.bound_method);
+                const p = stack.top - arg_count - 1;
+                p[0] = bound.receiver;
+
+                return call(bound.method, arg_count);
+            },
+            .class => {
+                const class: *lox.Class = obj.as(.class);
+                const p = stack.top - arg_count - 1;
+                p[0] = lox.Value.from(lox.Instance.create(class));
+
+                if (class.method.get(init_string)) |initializer| {
+                    return call(initializer.asObject().as(.closure), arg_count);
+                } else if (arg_count != 0) {
+                    runtimeError("Expected 0 arguments but got {d}.", .{arg_count});
+                    return error.RuntimeError;
+                }
+
+                return;
+            },
+            .closure => return call(obj.as(.closure), arg_count),
+            .native => {
+                const nativ = obj.as(.native);
                 const result = nativ.function((stack.top - arg_count)[0..arg_count]);
                 stack.top -= arg_count + 1;
                 stack.push(result);
@@ -391,7 +504,7 @@ fn callValue(callee: lox.Value, arg_count: u32) !void {
     return error.RuntimeError;
 }
 
-fn call(closure: *lox.Closure, arg_count: u32) !void {
+fn call(closure: *const lox.Closure, arg_count: u32) !void {
     if (arg_count != closure.function.arity) {
         runtimeError("Expected {} arguments but got {}.", .{ closure.function.arity, arg_count });
         return error.RuntimeError;
