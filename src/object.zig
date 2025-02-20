@@ -11,17 +11,23 @@ const Obj = @This();
 pub const Types = union(Tag) {
     string: String,
     function: Function,
+    native: Native,
+    closure: Closure,
+    upvalue: Upvalue,
+    class: Class,
 };
 
-pub const Tag = enum { string, function };
+pub const Tag = enum { string, function, native, closure, upvalue, class };
 
 next: ?*Obj,
 tag: Tag,
+marked: bool,
 
 pub fn init(tag: Tag, n: ?*Obj) Obj {
     return .{
         .next = n,
         .tag = tag,
+        .marked = false,
     };
 }
 
@@ -30,7 +36,7 @@ pub fn create(comptime tag: Tag) *meta.TagPayload(Types, tag) {
     const p = memory.gc.allocator().create(T) catch @panic("OOM");
     p.obj = Obj.init(tag, memory.gc.objects);
 
-    log.debug("create obj: {*} {s}", .{ p, @tagName(tag) });
+    log.debug("{*} allocate {d} for {s}", .{ p, @sizeOf(T), @tagName(tag) });
     memory.gc.objects = &p.obj;
 
     return p;
@@ -44,7 +50,7 @@ pub fn format(
 ) !void {
     _ = options;
 
-    try writer.print(" .tag = {s}, ", .{@tagName(self.tag)});
+    try writer.print(" .tag = {s}, .mark = {}", .{ @tagName(self.tag), self.marked });
     if (comptime std.mem.eql(u8, fmt, "*")) {
         try writer.print(" .next = {?*}", .{self.next});
     } else {
@@ -152,6 +158,7 @@ pub const String = struct {
         p.str = buf;
         p.hash = hash;
 
+        // table does not go through gc so its fine.
         _ = vm.strings.set(p, lox.Value.from(null));
 
         return p;
@@ -219,6 +226,115 @@ pub const Function = struct {
             } else {
                 try writer.writeAll("<script>");
             }
+        }
+    }
+};
+
+pub const Closure = struct {
+    obj: Obj,
+    function: *Function,
+    upvalues: []*Upvalue,
+
+    pub fn create(func: *Function) *Closure {
+        const p: *Closure = Obj.create(.closure);
+        p.function = func;
+        p.upvalues = memory.gc.allocator().alloc(*Upvalue, func.upvalue_count) catch @panic("OOM");
+
+        return p;
+    }
+
+    pub fn deinit(self: *Closure) void {
+        memory.gc.allocator().free(self.upvalues);
+    }
+
+    pub fn format(
+        self: *const Closure,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (comptime fmt.len == 0) {
+            try formatObj(self.*, fmt, options, writer, 2);
+        } else {
+            try writer.print("{s}", .{self.function});
+        }
+    }
+};
+
+pub const Native = struct {
+    pub const NativeFn = fn ([]const lox.Value) lox.Value;
+    obj: Obj,
+    function: *const NativeFn,
+
+    pub fn create(comptime func: NativeFn) *Native {
+        const p: *Native = Obj.create(.native);
+        p.function = &func;
+
+        return p;
+    }
+
+    pub fn format(
+        self: *const Native,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (comptime fmt.len == 0) {
+            try formatObj(self.*, fmt, options, writer, 2);
+        } else {
+            try writer.writeAll("<native fn>");
+        }
+    }
+};
+
+pub const Upvalue = struct {
+    obj: Obj,
+    location: *lox.Value,
+    next: ?*Upvalue,
+    closed: lox.Value,
+
+    pub fn create(slot: *lox.Value) *Upvalue {
+        const p: *Upvalue = Obj.create(.upvalue);
+        p.location = slot;
+        p.next = null;
+        p.closed = lox.Value.nil;
+        return p;
+    }
+
+    pub fn format(
+        self: *const Upvalue,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (comptime fmt.len == 0) {
+            try formatObj(self.*, fmt, options, writer, 2);
+        } else {
+            try writer.writeAll("upvalue");
+        }
+    }
+};
+
+pub const Class = struct {
+    obj: Obj,
+    name: *String,
+
+    pub fn create(name: *String) *Class {
+        const p: *Class = Obj.create(.class);
+        p.name = name;
+        return p;
+    }
+
+    pub fn format(
+        self: *const Class,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        if (comptime fmt.len == 0) {
+            try formatObj(self.*, fmt, options, writer, 2);
+        } else {
+            try writer.writeAll("class");
         }
     }
 };

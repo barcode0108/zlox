@@ -7,6 +7,7 @@ const Table = @import("table.zig");
 const container = @import("container.zig");
 const memory = @import("memory.zig");
 const lox = @import("lox.zig");
+const native = @import("native.zig");
 const io = @import("io.zig");
 const log = std.log.scoped(.VM);
 
@@ -24,7 +25,7 @@ const CallFrame = struct {
     ip: [*]u8,
     slots: [*]lox.Value,
 
-    function: *lox.Function,
+    closure: *lox.Closure,
 
     pub inline fn readByte(self: *CallFrame) u8 {
         const r = self.ip[0];
@@ -39,7 +40,7 @@ const CallFrame = struct {
     }
 
     pub inline fn readConstant(self: *CallFrame) lox.Value {
-        return self.function.chunk.constants.items[self.readByte()];
+        return self.closure.function.chunk.constants.items[self.readByte()];
     }
 
     pub inline fn readString(self: *CallFrame) *lox.String {
@@ -49,35 +50,42 @@ const CallFrame = struct {
 
 const CallFrames = container.Array(CallFrame, frame_max);
 
-var frames: CallFrames = undefined;
-
 var out_writer: io.Writer = undefined;
 var err_writer: io.Writer = undefined;
 
+pub var frames: CallFrames = undefined;
 pub var stack: container.Stack(lox.Value, stack_max) = undefined;
 pub var strings: Table = undefined;
 pub var globals: Table = undefined;
+pub var open_upvalues: ?*lox.Upvalue = null;
+pub var current: ?*Compiler = null;
 
 pub fn init(out: io.Writer, err: io.Writer) void {
-    stack.reset();
+    resetStack();
     frames.len = 0;
 
     out_writer = out;
     err_writer = err;
 
+    open_upvalues = null;
+    current = null;
     strings = Table.init(memory.gpa);
     globals = Table.init(memory.gpa);
+
+    defineNative("clock", native.clock);
 }
 
 pub fn deinit() void {
     strings.deinit();
     globals.deinit();
-    memory.gc.freeObjects();
+    memory.gc.deinit();
 }
 
 pub fn interpret(source: []const u8) InterpretError!void {
     var compiler = Compiler.init(err_writer);
+    current = &compiler;
     defer compiler.deinit();
+    defer current = null;
 
     const function = compiler.compile(source) catch {
         log.debug("Compile error", .{});
@@ -85,9 +93,20 @@ pub fn interpret(source: []const u8) InterpretError!void {
     };
 
     stack.push(lox.Value.from(function));
-    try call(function, 0);
+    const closure = lox.Closure.create(function);
+    _ = stack.pop();
+    stack.push(lox.Value.from(closure));
+
+    try call(closure, 0);
 
     try run();
+}
+
+fn resetStack() void {
+    stack.reset();
+    frames.len = 0;
+
+    open_upvalues = null;
 }
 
 fn runtimeError(comptime fmt: []const u8, args: anytype) void {
@@ -95,7 +114,7 @@ fn runtimeError(comptime fmt: []const u8, args: anytype) void {
 
     var it = std.mem.reverseIterator(frames.buf[0..frames.len]);
     while (it.nextPtr()) |frame| {
-        const function: *lox.Function = frame.function;
+        const function = frame.closure.function;
 
         const slices = function.chunk.codes.slice();
         const codes = slices.items(.code);
@@ -112,7 +131,7 @@ fn runtimeError(comptime fmt: []const u8, args: anytype) void {
         }
     }
 
-    stack.reset();
+    resetStack();
 }
 
 const Op = enum { add, sub, gt, lt, mul, div };
@@ -154,8 +173,8 @@ fn run() InterpretError!void {
             }
             log.debug("{s}", .{buf[0..i]});
 
-            const offset = frame.ip - frame.function.chunk.codes.items(.code).ptr;
-            _ = frame.function.chunk.disassembleAt(offset);
+            const offset = frame.ip - frame.closure.function.chunk.codes.items(.code).ptr;
+            _ = frame.closure.function.chunk.disassembleAt(offset);
         }
 
         const instr: OpCode = @enumFromInt(frame.readByte());
@@ -268,8 +287,38 @@ fn run() InterpretError!void {
                 try callValue(stack.peek(arg_count), arg_count);
                 frame = frames.backPtr();
             },
+            .Closure => {
+                const func = frame.readConstant().asObject().as(.function);
+                const closure = lox.Closure.create(func);
+                stack.push(lox.Value.from(closure));
+
+                for (closure.upvalues) |*upvalue| {
+                    const is_local = frame.readByte();
+                    const index = frame.readByte();
+
+                    if (is_local == 1) {
+                        upvalue.* = captureUpvalue(&frame.slots[index]);
+                    } else {
+                        upvalue.* = frame.closure.upvalues[index];
+                    }
+                }
+            },
+            .GetUpvalue => {
+                const slot = frame.readByte();
+                stack.push(frame.closure.upvalues[slot].location.*);
+            },
+            .SetUpvalue => {
+                const slot = frame.readByte();
+                frame.closure.upvalues[slot].location.* = stack.peek(0);
+            },
+            .CloseUpvalue => {
+                const p = stack.top - 1;
+                closeUpvalue(&p[0]);
+                _ = stack.pop();
+            },
             .Return => {
                 const result = stack.pop();
+                closeUpvalue(&frame.slots[0]);
                 frames.len -= 1;
 
                 if (frames.len == 0) {
@@ -281,8 +330,43 @@ fn run() InterpretError!void {
                 stack.push(result);
                 frame = frames.backPtr();
             },
-            else => {},
         }
+    }
+}
+
+fn captureUpvalue(local: *lox.Value) *lox.Upvalue {
+    var prev: ?*lox.Upvalue = null;
+    var upvalues = open_upvalues;
+    while (upvalues) |upvalue| : (upvalues = upvalue.next) {
+        if (@intFromPtr(upvalue.location) <= @intFromPtr(local)) break;
+
+        prev = upvalue;
+    }
+
+    if (upvalues) |upvalue| {
+        if (upvalue.location == local) {
+            return upvalue;
+        }
+    }
+
+    const created = lox.Upvalue.create(local);
+    created.next = upvalues;
+
+    if (prev) |p| {
+        p.next = created;
+    } else {
+        open_upvalues = created;
+    }
+
+    return created;
+}
+
+fn closeUpvalue(last: *lox.Value) void {
+    while (open_upvalues) |open| : (open_upvalues = open.next) {
+        if (@intFromPtr(open.location) < @intFromPtr(last)) break;
+
+        open.closed = open.location.*;
+        open.location = &open.closed;
     }
 }
 
@@ -291,7 +375,14 @@ fn callValue(callee: lox.Value, arg_count: u32) !void {
         const obj = callee.asObject();
 
         switch (obj.tag) {
-            inline .function => |tag| return call(obj.as(tag), arg_count),
+            inline .closure => |tag| return call(obj.as(tag), arg_count),
+            inline .native => |tag| {
+                const nativ = obj.as(tag);
+                const result = nativ.function((stack.top - arg_count)[0..arg_count]);
+                stack.top -= arg_count + 1;
+                stack.push(result);
+                return;
+            },
             else => {},
         }
     }
@@ -300,9 +391,9 @@ fn callValue(callee: lox.Value, arg_count: u32) !void {
     return error.RuntimeError;
 }
 
-fn call(function: *lox.Function, arg_count: u32) !void {
-    if (arg_count != function.arity) {
-        runtimeError("Expected {} arguments but got {}.", .{ function.arity, arg_count });
+fn call(closure: *lox.Closure, arg_count: u32) !void {
+    if (arg_count != closure.function.arity) {
+        runtimeError("Expected {} arguments but got {}.", .{ closure.function.arity, arg_count });
         return error.RuntimeError;
     }
 
@@ -312,7 +403,16 @@ fn call(function: *lox.Function, arg_count: u32) !void {
     }
 
     const frame = frames.addOne();
-    frame.function = function;
-    frame.ip = function.chunk.codes.items(.code).ptr;
+    frame.closure = closure;
+    frame.ip = closure.function.chunk.codes.items(.code).ptr;
     frame.slots = stack.top - arg_count - 1;
+}
+
+fn defineNative(comptime name: []const u8, comptime func: lox.Native.NativeFn) void {
+    stack.push(lox.Value.from(lox.String.copy(name)));
+    stack.push(lox.Value.from(lox.Native.create(func)));
+    _ = globals.set(stack.items[0].asObject().as(.string), stack.items[1]);
+
+    _ = stack.pop();
+    _ = stack.pop();
 }

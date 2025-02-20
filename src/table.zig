@@ -131,6 +131,16 @@ pub fn findString(self: *const Self, buf: []const u8, hash: u32) ?*lox.String {
     }
 }
 
+pub fn removeWhite(self: *Self) void {
+    for (self.entries) |*entry| {
+        if (entry.key) |key| {
+            if (!key.obj.marked) {
+                self.delete(key) catch unreachable;
+            }
+        }
+    }
+}
+
 test "Table" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();

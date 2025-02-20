@@ -14,11 +14,15 @@ pub fn build(b: *std.Build) void {
         b.option(bool, "trace_execution", "trace execution") orelse false;
     const print_code =
         b.option(bool, "print_code", "print code") orelse true;
+    const stress_gc =
+        b.option(bool, "stress_gc", "stress gc") orelse false;
+
     const testing_allcator = false;
 
     const debug_flag = b.addOptions();
     debug_flag.addOption(bool, "trace_execution", if (optimize == .Debug) trace_execution else false);
     debug_flag.addOption(bool, "print_code", if (optimize == .Debug) print_code else false);
+    debug_flag.addOption(bool, "stress_gc", if (optimize == .Debug) stress_gc else false);
     debug_flag.addOption(bool, "testing_allocator", if (optimize == .Debug) testing_allcator else false);
 
     exe_mod.addOptions("debug", debug_flag);
@@ -27,6 +31,11 @@ pub fn build(b: *std.Build) void {
         .name = "zlox",
         .root_module = exe_mod,
     });
+
+    switch (optimize) {
+        .ReleaseFast, .ReleaseSmall => exe.linkLibC(),
+        else => {},
+    }
 
     b.installArtifact(exe);
 

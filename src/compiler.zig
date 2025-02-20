@@ -21,15 +21,17 @@ const FunctionType = enum {
     script,
 };
 
-const Compiler = struct {
+pub const Compiler = struct {
     enclosing: ?*Compiler,
     function: *lox.Function,
     ftype: FunctionType,
 
     locals: Locals,
+    upvalues: Upvalues,
     scope_depth: u32,
 
     const Locals = container.Array(Local, std.math.maxInt(u8) + 1);
+    const Upvalues = container.Array(Upvalue, std.math.maxInt(u8) + 1);
 
     pub fn init(comptime ft: FunctionType, name: []const u8, enclosing: ?*Compiler) Compiler {
         var ret = Compiler{
@@ -37,6 +39,7 @@ const Compiler = struct {
             .function = lox.Function.create(if (ft == .script) null else name),
             .ftype = ft,
             .locals = Locals.init(),
+            .upvalues = Upvalues.init(),
             .scope_depth = 0,
         };
 
@@ -60,13 +63,14 @@ const Compiler = struct {
         while (self.locals.len > 0 and
             if (self.locals.backPtr().depth) |d| d > self.scope_depth else false) : (self.locals.len -= 1)
         {
-            self.function.chunk.writeOp(.Pop, line);
+            self.function.chunk.writeOp(if (self.locals.backPtr().captured) .CloseUpvalue else .Pop, line);
         }
     }
 
     pub fn end(self: *Compiler) *lox.Function {
         const lines = self.function.chunk.codes.items(.line);
-        const line = lines[lines.len - 1];
+
+        const line = if (lines.len > 0) lines[lines.len - 1] else 0;
         self.addReturn(line);
 
         if (comptime debug_print_code) {
@@ -87,6 +91,12 @@ const Compiler = struct {
 const Local = struct {
     name: Token,
     depth: ?u32,
+    captured: bool,
+};
+
+const Upvalue = struct {
+    index: u8,
+    is_local: bool,
 };
 
 const Parser = @This();
@@ -99,7 +109,7 @@ had_error: bool,
 panic_mode: bool,
 lexer: Lexer,
 
-current_compiler: *Compiler,
+current_compiler: ?*Compiler,
 
 pub fn init(err: io.Writer) Parser {
     return .{
@@ -108,7 +118,7 @@ pub fn init(err: io.Writer) Parser {
         .had_error = false,
         .panic_mode = false,
         .lexer = undefined,
-        .current_compiler = undefined,
+        .current_compiler = null,
         .err_writer = err,
     };
 }
@@ -128,7 +138,8 @@ pub fn compile(self: *Parser, source: []const u8) error{CompileError}!*lox.Funct
         self.declaration();
     }
 
-    const ret = self.endCompiler();
+    const ret = compiler.end();
+    self.current_compiler = null;
 
     if (self.had_error) return error.CompileError;
 
@@ -139,14 +150,9 @@ pub fn deinit(self: *Parser) void {
     _ = self;
 }
 
-fn endCompiler(self: *Parser) *lox.Function {
-    const p = self.current_compiler.end();
-    self.current_compiler = self.current_compiler.enclosing orelse undefined;
-    return p;
-}
-
 fn currentChunk(self: *Parser) *Chunk {
-    return &self.current_compiler.function.chunk;
+    const com = self.current_compiler orelse unreachable;
+    return &com.function.chunk;
 }
 
 fn errorAtCurr(self: *Parser, msg: []const u8) void {
@@ -194,7 +200,8 @@ fn emitConstant(self: *Parser, v: lox.Value) void {
 }
 
 fn emitReturn(self: *Parser) void {
-    self.current_compiler.addReturn(self.prev.line);
+    const com = self.current_compiler orelse unreachable;
+    com.addReturn(self.prev.line);
 }
 
 fn emitJump(self: *Parser, op: OpCode) usize {
@@ -249,14 +256,38 @@ fn identifierConstant(self: *Parser, name: *const Token) u8 {
 }
 
 fn addLocal(self: *Parser, name: *const Token) void {
-    if (self.current_compiler.locals.full()) {
+    const com = self.current_compiler orelse unreachable;
+    if (com.locals.full()) {
         self.errorAtPrev("Too many local variables in function.");
     }
 
-    const p = self.current_compiler.locals.addOne();
+    const p = com.locals.addOne();
 
     p.name = name.*;
     p.depth = 0;
+    p.captured = false;
+}
+
+fn addUpvalue(self: *Parser, compiler: *Compiler, index: u8, comptime is_local: bool) u8 {
+    const len = compiler.function.upvalue_count;
+
+    for (compiler.upvalues.buf[0..len], 0..) |upvalue, idx| {
+        if (upvalue.index == index and upvalue.is_local == is_local) {
+            return @intCast(idx);
+        }
+    }
+
+    if (len == std.math.maxInt(u8)) {
+        self.errorAtPrev("Too many closure variables in function.");
+
+        return 0;
+    }
+
+    compiler.upvalues.buf[len].is_local = is_local;
+    compiler.upvalues.buf[len].index = index;
+
+    compiler.function.upvalue_count += 1;
+    return @truncate(len);
 }
 
 fn advance(self: *Parser) void {
@@ -510,8 +541,9 @@ fn function(self: *Parser, comptime ft: FunctionType) void {
     if (!self.check(.RightParen)) {
         // arguments
         while (true) {
-            self.current_compiler.function.arity += 1;
-            if (self.current_compiler.function.arity > std.math.maxInt(u8)) {
+            const com = self.current_compiler orelse unreachable;
+            com.function.arity += 1;
+            if (com.function.arity > std.math.maxInt(u8)) {
                 self.errorAtCurr("Can't have more than 255 parameters.");
             }
 
@@ -526,8 +558,15 @@ fn function(self: *Parser, comptime ft: FunctionType) void {
 
     self.block();
 
-    const func = self.endCompiler();
-    self.emitBytes(.Constant, self.makeConstant(lox.Value.from(func)));
+    const func = compiler.end();
+    self.current_compiler = compiler.enclosing;
+
+    self.emitBytes(.Closure, self.makeConstant(lox.Value.from(func)));
+
+    for (compiler.upvalues.buf[0..func.upvalue_count]) |upvalue| {
+        self.emitByte(if (upvalue.is_local) 1 else 0);
+        self.emitByte(upvalue.index);
+    }
 }
 
 fn namedVariable(self: *Parser, name: Token, can_assign: bool) void {
@@ -538,9 +577,10 @@ fn namedVariable(self: *Parser, name: Token, can_assign: bool) void {
     };
 
     const ops = bk: {
-        if (self.resolveLocal(self.current_compiler, &name)) |a| {
+        const com = self.current_compiler orelse unreachable;
+        if (self.resolveLocal(com, &name)) |a| {
             break :bk Ops{ .get_op = .GetLocal, .set_op = .SetLocal, .arg = a };
-        } else if (self.resolveUpvalue(self.current_compiler, &name)) |a| {
+        } else if (self.resolveUpvalue(com, &name)) |a| {
             break :bk Ops{ .get_op = .GetUpvalue, .set_op = .SetUpvalue, .arg = a };
         } else {
             break :bk Ops{ .get_op = .GetGlobal, .set_op = .SetGlobal, .arg = self.identifierConstant(&name) };
@@ -573,11 +613,17 @@ fn resolveLocal(self: *Parser, compiler: *const Compiler, name: *const Token) ?u
 }
 
 fn resolveUpvalue(self: *Parser, compiler: *Compiler, name: *const Token) ?u8 {
-    _ = self;
-    _ = compiler;
-    _ = name;
+    if (compiler.enclosing) |enclosing| {
+        if (self.resolveLocal(enclosing, name)) |local| {
+            enclosing.locals.buf[local].captured = true;
+            return self.addUpvalue(compiler, local, true);
+        }
 
-    // TODO:
+        if (self.resolveUpvalue(enclosing, name)) |upvalue| {
+            return self.addUpvalue(compiler, upvalue, false);
+        }
+    }
+
     return null;
 }
 
@@ -630,13 +676,15 @@ fn parseVariable(self: *Parser, comptime msg: []const u8) u8 {
     self.consume(.Identifier, msg);
 
     self.declareVariable();
-    if (self.current_compiler.scope_depth > 0) return 0;
+    const com = self.current_compiler orelse unreachable;
+    if (com.scope_depth > 0) return 0;
 
     return self.identifierConstant(&self.prev);
 }
 
 fn defineVariable(self: *Parser, code: u8) void {
-    if (self.current_compiler.scope_depth > 0) {
+    const com = self.current_compiler orelse unreachable;
+    if (com.scope_depth > 0) {
         self.markInitialized();
         return;
     }
@@ -645,13 +693,14 @@ fn defineVariable(self: *Parser, code: u8) void {
 }
 
 fn declareVariable(self: *Parser) void {
-    if (self.current_compiler.scope_depth == 0) return;
+    if (self.current_compiler.?.scope_depth == 0) return;
 
     const name = &self.prev;
 
-    var it = std.mem.reverseIterator(self.current_compiler.locals.buf[0..self.current_compiler.locals.len]);
+    const com = self.current_compiler orelse unreachable;
+    var it = std.mem.reverseIterator(com.locals.buf[0..com.locals.len]);
     while (it.nextPtr()) |local| {
-        if (local.depth != null and local.depth.? < self.current_compiler.scope_depth) {
+        if (local.depth != null and local.depth.? < com.scope_depth) {
             break;
         }
 
@@ -664,8 +713,9 @@ fn declareVariable(self: *Parser) void {
 }
 
 fn markInitialized(self: *Parser) void {
-    if (self.current_compiler.scope_depth == 0) return;
-    self.current_compiler.locals.backPtr().depth = self.current_compiler.scope_depth;
+    const com = self.current_compiler orelse unreachable;
+    if (com.scope_depth == 0) return;
+    com.locals.backPtr().depth = com.scope_depth;
 }
 
 fn statement(self: *Parser) void {
@@ -678,9 +728,9 @@ fn statement(self: *Parser) void {
     } else if (self.match(.While)) {
         self.whileStatement();
     } else if (self.match(.LeftBrace)) {
-        self.current_compiler.beginScope();
+        self.current_compiler.?.beginScope();
         self.block();
-        self.current_compiler.endScope();
+        self.current_compiler.?.endScope();
     } else if (self.match(.Return)) {
         self.returnStatement();
     } else {
@@ -695,8 +745,8 @@ fn printStatement(self: *Parser) void {
 }
 
 fn forStatement(self: *Parser) void {
-    self.current_compiler.beginScope();
-    defer self.current_compiler.endScope();
+    self.current_compiler.?.beginScope();
+    defer self.current_compiler.?.endScope();
 
     self.consume(.LeftParen, "Expect '(' after 'for'.");
 
@@ -782,13 +832,13 @@ fn whileStatement(self: *Parser) void {
 }
 
 fn returnStatement(self: *Parser) void {
-    if(self.current_compiler.ftype == .script) {
-        errorAtPrev("Can't return from top-level code.");
+    if (self.current_compiler.?.ftype == .script) {
+        self.errorAtPrev("Can't return from top-level code.");
         return;
     }
 
-    if(self.match(.Semicolon)) {
-        self.current_compiler.addReturn(self.prev.line);
+    if (self.match(.Semicolon)) {
+        self.current_compiler.?.addReturn(self.prev.line);
     } else {
         self.expression();
         self.consume(.Semicolon, "Expect ';' after return value.");

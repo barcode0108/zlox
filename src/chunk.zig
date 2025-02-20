@@ -32,6 +32,8 @@ pub const OpCode = enum(u8) {
     JumpIfFalse,
     Loop,
     Call,
+    Closure,
+    CloseUpvalue,
     Return,
 };
 
@@ -135,16 +137,58 @@ pub fn disassembleAt(self: *const Self, offset: usize) usize {
         .Not,
         .Negate,
         .Print,
+        .CloseUpvalue,
         .Return,
         => |op| simpleInstruction(buf[i..], @tagName(op), offset),
-        inline .Constant, .SetGlobal, .GetGlobal, .DefineGlobal => |op| constantInstruction(buf[i..], @tagName(op), self, offset),
-        inline .Call, .SetLocal, .GetLocal => |op| byteInstruction(buf[i..], @tagName(op), self, offset),
-        inline .JumpIfFalse, .Jump, .Loop => |op| jumpInstruction(buf[i..], if (op == .Loop) -1 else 1, @tagName(op), codes, offset),
-
-        else => offset + 1,
+        inline .Constant,
+        .SetGlobal,
+        .GetGlobal,
+        .DefineGlobal,
+        .Closure,
+        => |op| constantInstruction(buf[i..], @tagName(op), self, offset),
+        inline .Call,
+        .SetLocal,
+        .GetLocal,
+        .SetUpvalue,
+        .GetUpvalue,
+        => |op| byteInstruction(buf[i..], @tagName(op), self, offset),
+        inline .JumpIfFalse,
+        .Jump,
+        .Loop,
+        => |op| jumpInstruction(buf[i..], if (op == .Loop) -1 else 1, @tagName(op), codes, offset),
+        // inline .Closure => |op| {
+        //     const constant = codes[offset + 1];
+        //     _ = std.fmt.bufPrint(buf[i..], "{s:<16} {d:4} {s}", .{
+        //         @tagName(op),
+        //         constant,
+        //         self.constants.items[constant],
+        //     }) catch unreachable;
+        //
+        //     break :sw offset + 2;
+        // },
     };
 
     log.debug("{s}", .{buf});
+
+    if (instr == .Closure) {
+        var off = ret;
+        const func: *lox.Function = self.constants.items[codes[off - 1]].asObject().as(.function);
+
+        for (0..func.upvalue_count) |_| {
+            const is_local = codes[off];
+            const index = codes[off + 1];
+
+            off += 2;
+
+            log.debug("{d:04}      |                     {s} {d}", .{
+                off - 2,
+                if (is_local == 1) "local" else "upvalue",
+                index,
+            });
+        }
+
+        return off;
+    }
 
     return ret;
 }
