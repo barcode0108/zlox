@@ -95,10 +95,12 @@ pub const Compiler = struct {
 
 const ClassCompiler = struct {
     enclosing: ?*ClassCompiler,
+    has_superclass: bool,
 
     pub fn init(enclosing: ?*ClassCompiler) ClassCompiler {
         return .{
             .enclosing = enclosing,
+            .has_superclass = false,
         };
     }
 };
@@ -417,6 +419,7 @@ const rules = Rules.initDefault(ParseRule{}, .{
     .Dot = ParseRule.init(null, dot, .Call),
 
     .This = ParseRule.initPrefix(this),
+    .Super = ParseRule.initPrefix(super),
 
     .False = ParseRule.initPrefix(literal),
     .True = ParseRule.initPrefix(literal),
@@ -555,6 +558,34 @@ fn this(self: *Parser, _: bool) void {
     }
 
     self.variable(false);
+}
+
+fn super(self: *Parser, _: bool) void {
+    if (self.current_class) |c| {
+        if (!c.has_superclass) {
+            self.errorAtPrev("Can't use 'super' in a class with no superclass.");
+        }
+    } else {
+        self.errorAtPrev("Can't use 'super' outside of a class.");
+    }
+
+    self.consume(.Dot, "Expect '.' after 'super'.");
+    self.consume(.Identifier, "Expect superclass method name.");
+    const name = self.identifierConstant(&self.prev);
+
+    const t = Token{ .lexeme = "this", .type = undefined, .line = undefined };
+    const s = Token{ .lexeme = "super", .type = undefined, .line = undefined };
+
+    self.namedVariable(t, false);
+    if (self.match(.LeftParen)) {
+        const count = self.argumentList();
+        self.namedVariable(s, false);
+        self.emitBytes(.InvokeSuper, name);
+        self.emitByte(count);
+    } else {
+        self.namedVariable(s, false);
+        self.emitBytes(.GetSuper, name);
+    }
 }
 
 fn argumentList(self: *Parser) u8 {
@@ -727,6 +758,25 @@ fn classDeclaration(self: *Parser) void {
     self.current_class = &class_compiler;
     defer self.current_class = self.current_class.?.enclosing;
 
+    if (self.match(.Less)) {
+        self.consume(.Identifier, "Expect superclass name.");
+        self.variable(false);
+
+        if (identifierEqual(&class_name, &self.prev)) {
+            self.errorAtPrev("A class can't inherit from itself.");
+        }
+
+        self.namedVariable(class_name, false);
+        self.emitOp(.Inherit);
+        self.current_class.?.has_superclass = true;
+    }
+
+    self.current_compiler.?.beginScope();
+
+    const s = Token{ .lexeme = "super", .line = undefined, .type = undefined };
+    self.addLocal(&s);
+    self.defineVariable(0);
+
     self.namedVariable(class_name, false);
 
     self.consume(.LeftBrace, "Expect '{' before class body.");
@@ -737,6 +787,10 @@ fn classDeclaration(self: *Parser) void {
 
     self.consume(.RightBrace, "Expect '}' after class body.");
     self.emitOp(.Pop);
+
+    if (self.current_class.?.has_superclass) {
+        self.current_compiler.?.endScope();
+    }
 }
 
 fn funDeclaration(self: *Parser) void {

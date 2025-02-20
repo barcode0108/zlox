@@ -373,6 +373,35 @@ fn run() InterpretError!void {
 
                 frame = frames.backPtr();
             },
+            .Inherit => {
+                const superclassv = stack.peek(1);
+                const subclass: *lox.Class = stack.peek(0).asObject().as(.class);
+
+                if (!superclassv.isObject() and !superclassv.asObject().is(.class)) {
+                    runtimeError("Superclass must be a class.", .{});
+                    return error.RuntimeError;
+                }
+
+                const superclass: *lox.Class = superclassv.asObject().as(.class);
+                subclass.method.addAll(superclass.method.entries);
+
+                _ = stack.pop(); // subclass
+
+            },
+            .GetSuper => {
+                const name = frame.readString();
+
+                const superclass = stack.pop().asObject().as(.class);
+
+                try bindMethod(superclass, name);
+            },
+            .InvokeSuper => {
+                const method = frame.readString();
+                const count = frame.readByte();
+                const superclass = stack.pop().asObject().as(.class);
+                try invokeFromClass(superclass, method, count);
+                frame = frames.backPtr();
+            },
         }
     }
 }

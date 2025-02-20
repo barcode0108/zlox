@@ -114,6 +114,14 @@ pub fn delete(self: *Self, key: *lox.String) error{NotFound}!void {
     e.value = lox.Value.from(true);
 }
 
+pub fn addAll(self: *Self, entries: []const Entry) void {
+    for (entries) |*entry| {
+        if (entry.key) |key| {
+            _ = self.set(key, entry.value);
+        }
+    }
+}
+
 pub fn findString(self: *const Self, buf: []const u8, hash: u32) ?*lox.String {
     if (self.len == 0) return null;
 

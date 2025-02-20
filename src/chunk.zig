@@ -40,6 +40,9 @@ pub const OpCode = enum(u8) {
     GetProperty,
     Method,
     Invoke,
+    Inherit,
+    GetSuper,
+    InvokeSuper,
 };
 
 const Self = @This();
@@ -144,6 +147,8 @@ pub fn disassembleAt(self: *const Self, offset: usize) usize {
         .Print,
         .CloseUpvalue,
         .Return,
+        .Inherit,
+        .GetSuper,
         => |op| simpleInstruction(buf[i..], @tagName(op), offset),
         inline .Constant,
         .SetGlobal,
@@ -165,7 +170,9 @@ pub fn disassembleAt(self: *const Self, offset: usize) usize {
         .Jump,
         .Loop,
         => |op| jumpInstruction(buf[i..], if (op == .Loop) -1 else 1, @tagName(op), codes, offset),
-        inline .Invoke => |op| invokeInstruction(buf[i..], @tagName(op), self, offset),
+        inline .Invoke,
+        .InvokeSuper,
+        => |op| invokeInstruction(buf[i..], @tagName(op), self, offset),
     };
 
     log.debug("{s}", .{buf});
